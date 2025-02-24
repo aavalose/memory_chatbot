@@ -1,10 +1,15 @@
 import torch
+import sys
+import os
 from transformers import pipeline
 from langchain_core.prompts import (ChatPromptTemplate, HumanMessagePromptTemplate, MessagesPlaceholder)
 from langchain_core.messages import SystemMessage
 from langchain.chains import LLMChain
 from langchain.memory import ConversationBufferMemory
 from langchain.llms import HuggingFacePipeline
+from embed import embed_mini, get_top_k_similarities
+from qa_dict_gen import qa_dict_gen
+
 
 def get_ml_response(query, memory):
     model_id = "meta-llama/Llama-3.2-1B-Instruct"
@@ -23,32 +28,40 @@ def get_ml_response(query, memory):
     # Wrap the pipeline in HuggingFacePipeline
     llm = HuggingFacePipeline(pipeline=pipe)
 
-    # Define prompt template
+    # Embed the query and find most similar from embeddings file
+    query_embedding = embed_mini(query)
+    saved_embeddings = torch.load('arraigo_embeddings.pt', weights_only=False)
+
+    qa_dict = qa_dict_gen('qa_arraigo')
+    questions = list(qa_dict.keys())
+    
+    # Get most similar embedding index and document
+    similar_idx = get_top_k_similarities(query_embedding, saved_embeddings, k=1)[0]
+    similar_doc = questions[similar_idx]
+    similar_answer = qa_dict[similar_doc]
+
+    # Define prompt template with similar embedding context and answer
     prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content="You are a chatbot that is an expert on machine learning."),
+        SystemMessage(content="You are a chatbot that is an expert on Migration to Spain under the Arraigo program."),
         MessagesPlaceholder(variable_name="history"),
-        HumanMessagePromptTemplate.from_template("{input}")
+        SystemMessage(content=f"Here is some relevant context: Question: {similar_doc}\nAnswer: {similar_answer}"),
+        SystemMessage(content=f"The user asks: {query}")
     ])
 
-    # Create LLM chain
+    # Create LLM chain with memory
     llm_chain = LLMChain(llm=llm, prompt=prompt, memory=memory)
 
-    # Invoke the chain with the query
-    output = llm_chain.invoke({"input": query})
+    # Use load_memory_variables to get the history
+    history = memory.load_memory_variables({}).get("history", [])
+
+    # Invoke the chain with the query and history
+    output = llm_chain.invoke({"input": query, "history": history})
     
     # Save conversation to file
     with open('conversation_history.txt', 'a') as f:
         f.write(f"User: {query}\n")
-        f.write(f"Assistant: {output['text']}\n\n")
+        f.write(f"{output['text']}\n\n")
     
-    return output['text']
-
-# Initialize memory
-memory = ConversationBufferMemory(return_messages=True)
-
-# Example usage
-response = get_ml_response("Hi, how are you?", memory)
-print(response)
-
-response = get_ml_response("What did I just ask you?", memory)
-print(response)
+    # Extract just the final answer from the output
+    response = output['text'].split("Answer:")[-1].strip()
+    return response
